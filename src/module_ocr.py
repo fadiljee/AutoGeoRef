@@ -62,18 +62,9 @@ def crop_corners(image_path, filename):
 
 def parse_coordinate_text(text):
     """
-    Strict Regex Validation - extract float with >= 4 decimal places.
-    Falls back to accepting >= 2 decimal places so partial reads still work.
+    Strict Regex Validation - extract float with >= 6 decimal places (PRD v2.0 requirement).
     """
-    # Try strict: >= 6 decimal places (PRD v2.0 requirement)
     matches = re.findall(r'-?\d+\.\d{6,}', text)
-    if matches:
-        try:
-            return float(matches[0])
-        except ValueError:
-            pass
-    # Fallback: accept >= 2 decimal places 
-    matches = re.findall(r'-?\d+\.\d{2,}', text)
     if matches:
         try:
             return float(matches[0])
@@ -84,50 +75,36 @@ def parse_coordinate_text(text):
 def extract_coordinates(corners):
     """
     Apply EasyOCR to cropped corners and return extracted coords.
+    Processes both original and 90-degree rotated versions to handle vertical text.
     """
     results = {}
     for name, img in corners.items():
         processed = advanced_preprocessing(img)
-
-        # EasyOCR returns list of (bbox, text, confidence)
-        ocr_results = ocr_reader.readtext(processed, detail=1, paragraph=False,
-                                          allowlist='0123456789.-')
-
-        extracted_val = None
-        for (_, text, confidence) in ocr_results:
-            if confidence < 0.3:
+        
+        extracted_vals = []
+        # Process original (for horizontal text) and rotated 90 degrees (for vertical text)
+        for img_variant in [processed, cv2.rotate(processed, cv2.ROTATE_90_CLOCKWISE)]:
+            try:
+                ocr_results = ocr_reader.readtext(img_variant, detail=1, paragraph=False,
+                                                  allowlist='0123456789.-')
+            except Exception:
                 continue
-            val = parse_coordinate_text(text)
-            if val is not None:
-                extracted_val = val
-                break
+            
+            for (_, text, confidence) in ocr_results:
+                if confidence < 0.3:
+                    continue
+                val = parse_coordinate_text(text)
+                if val is not None and val not in extracted_vals:
+                    extracted_vals.append(val)
 
-        results[name] = extracted_val
+        results[name] = extracted_vals
 
     return results
 
 def validate_and_consolidate(extracted_results):
     """
     Map corner OCR results to geospatial variables and validate.
-    top_left  -> X_min, Y_max
-    top_right -> X_max, Y_max
-    bottom_left  -> X_min, Y_min
-    bottom_right -> X_max, Y_min
     """
-    tl = extracted_results.get("top_left")
-    tr = extracted_results.get("top_right")
-    bl = extracted_results.get("bottom_left")
-    br = extracted_results.get("bottom_right")
-
-    # Determine coordinates from available results
-    X_min = tl if tl is not None else (bl if bl is not None else None)
-    X_max = tr if tr is not None else (br if br is not None else None)
-    Y_max_val = tl if tl is not None else (tr if tr is not None else None)
-    Y_min_val = bl if bl is not None else (br if br is not None else None)
-
-    # If OCR failed on all corners, return None
-    if None in (X_min, X_max, Y_max_val, Y_min_val):
-        return None
 
     # For Bangka area: longitude ~105-108 (X), latitude ~-1.5 to -3.5 (Y)
     # Corner top = Y_max (less negative), corner bottom = Y_min (more negative)
@@ -147,10 +124,13 @@ def validate_and_consolidate(extracted_results):
 
     # Collect all extracted non-None values and classify
     coords = {'X': [], 'Y': []}
-    for corner_name, val in extracted_results.items():
-        ctype, cval = classify(val)
-        if ctype:
-            coords[ctype].append(cval)
+    for corner_name, vals in extracted_results.items():
+        if not isinstance(vals, list):
+            vals = [vals]
+        for val in vals:
+            ctype, cval = classify(val)
+            if ctype:
+                coords[ctype].append(cval)
 
     if len(coords['X']) < 1 or len(coords['Y']) < 1:
         return None

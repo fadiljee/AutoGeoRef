@@ -6,17 +6,18 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import config
-from src.module_geo_calc import calculate_affine, generate_pgw, copy_image_to_output
+from src.module_ocr import crop_corners, extract_coordinates, validate_and_consolidate
+from src.module_geo_calc import calculate_affine, generate_pgw, copy_image_to_output, get_neatline_bounds
 from src.module_geo_calc import generate_aux_xml
 
 INPUT_DIR   = config.INPUT_DIR
 OUTPUT_DIR  = config.OUTPUT_DIR
 LOG_DIR     = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 LOG_FILE    = os.path.join(LOG_DIR, "processing_report.csv")
-MANUAL_CSV  = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "manual_coords.csv")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(config.TEMP_DIR, exist_ok=True)
 
 def log_result(filename, status, message=""):
     with open(LOG_FILE, "a", newline="") as f:
@@ -29,53 +30,53 @@ def run():
         writer = csv.writer(f)
         writer.writerow(["filename", "status", "message"])
 
-    # Load manual coordinates
-    if not os.path.exists(MANUAL_CSV):
-        print(f"ERROR: File koordinat manual tidak ditemukan: {MANUAL_CSV}")
+    if not os.path.exists(INPUT_DIR):
+        print(f"ERROR: Folder {INPUT_DIR} tidak ditemukan")
         return
 
-    with open(MANUAL_CSV, newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+    # Batch processing from INPUT_DIR
+    files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(".jpg")]
+    total = len(files)
+    
+    if total == 0:
+        print(f"Tidak ada file JPG di folder {INPUT_DIR}")
+        return
 
-    total = len(rows)
-    print(f"Memproses {total} file dari koordinat manual...\n")
+    print(f"Memproses {total} file gambar...\n")
 
-    for i, row in enumerate(rows, 1):
-        filename = row["filename"].strip()
+    for i, filename in enumerate(files, 1):
         print(f"Processing {i}/{total}: {filename}")
+        image_path = os.path.join(INPUT_DIR, filename)
 
         try:
-            X_min = row.get("X_min", "").strip()
-            X_max = row.get("X_max", "").strip()
-            Y_min = row.get("Y_min", "").strip()
-            Y_max = row.get("Y_max", "").strip()
-
-            if not all([X_min, X_max, Y_min, Y_max]):
-                log_result(filename, "SKIP", "Koordinat belum diisi")
-                print(f"  -> SKIP: Koordinat belum diisi\n")
+            # 1. Crop corners
+            corners, dim = crop_corners(image_path, filename)
+            
+            # 2. Extract OCR
+            extracted = extract_coordinates(corners)
+            
+            # 3. Validate & Consolidate
+            coords = validate_and_consolidate(extracted)
+            
+            if not coords:
+                log_result(filename, "ERROR", "OCR gagal mengekstrak koordinat valid")
+                print(f"  -> ERROR: OCR gagal mengekstrak koordinat valid\n")
                 continue
+                
+            X_min = coords['X_min']
+            X_max = coords['X_max']
+            Y_min = coords['Y_min']
+            Y_max = coords['Y_max']
 
-            X_min = float(X_min)
-            X_max = float(X_max)
-            Y_min = float(Y_min)
-            Y_max = float(Y_max)
-
-            # Read image for dimensions
-            import cv2
-            image_path = os.path.join(INPUT_DIR, filename)
-            img = cv2.imread(image_path)
-            if img is None:
-                log_result(filename, "ERROR", f"Tidak bisa membaca gambar: {filename}")
-                print(f"  -> ERROR: Tidak bisa membaca gambar\n")
-                continue
-
-            img_height, img_width = img.shape[:2]
+            # Detect inner map bounds (neatline)
+            neatline_bounds = get_neatline_bounds(image_path)
+            nx, ny, nw, nh = neatline_bounds
+            print(f"  -> Neatline Detected: x={nx}, y={ny}, w={nw}, h={nh}")
 
             # Generate georef outputs
-            affine = calculate_affine(X_min, X_max, Y_min, Y_max, img_width, img_height)
+            affine = calculate_affine(X_min, X_max, Y_min, Y_max, neatline_bounds)
             generate_pgw(filename, affine, OUTPUT_DIR)
-            generate_aux_xml(filename, X_min, X_max, Y_min, Y_max, OUTPUT_DIR)
+            generate_aux_xml(filename, affine, OUTPUT_DIR)
             copy_image_to_output(image_path, filename, OUTPUT_DIR)
 
             log_result(filename, "SUCCESS", f"X:[{X_min},{X_max}] Y:[{Y_min},{Y_max}]")

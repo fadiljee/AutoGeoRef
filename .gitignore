@@ -7,7 +7,7 @@ PRD/
 # Data - tidak di-track git
 # ===========================
 data/1_input_raw/
-data/2_temp_crop_debug/
+data/2_temp_crop_debug/ 
 data/3_output_ready/
 data/manual_coords.csv
 
